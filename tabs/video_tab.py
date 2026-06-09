@@ -1,40 +1,24 @@
-from __future__ import annotations
-
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, messagebox
+from core.registry_tools import set_video
 
-from core.resolution import list_display_resolutions
-from core import win_registry
-
-
+COMMON_RES=[(640,400),(640,480),(800,600),(1024,768),(1280,720),(1280,768),(1360,768),(1366,768),(1440,900),(1600,900),(1680,1050),(1920,1080),(2560,1440)]
 class VideoTab(ttk.Frame):
-    def __init__(self, master, app):
-        super().__init__(master, padding=8)
-        self.app = app
-        self.cfg = app.cfg
-        self.build()
-
-    def build(self):
-        ttk.Label(self, text="Video / Resolución", style="Title.TLabel").pack(anchor="w", pady=(0, 6))
-        form = ttk.LabelFrame(self, text="Configuración gráfica", padding=8)
-        form.pack(fill="x")
-        self.res_var = tk.StringVar(value=self.cfg.get("LAUNCH", "selected_resolution", "1280x720"))
-        self.combo = ttk.Combobox(form, textvariable=self.res_var, values=list_display_resolutions(), state="readonly", width=22)
-        ttk.Label(form, text="Resolución:").grid(row=0, column=0, sticky="w")
-        self.combo.grid(row=0, column=1, sticky="w", padx=6)
-        self.shadows_var = tk.BooleanVar(value=self.cfg.get_bool("LAUNCH", "unit_shadows", True))
-        ttk.Checkbutton(form, text="Sombras de unidades", variable=self.shadows_var).grid(row=1, column=1, sticky="w", padx=6, pady=5)
-        ttk.Button(form, text="💾 Aplicar al registro", style="Accent.TButton", command=self.apply).grid(row=2, column=1, sticky="w", padx=6, pady=(2, 0))
-        ttk.Label(
-            self,
-            text="WC3 clásico usa DWORD: reswidth/resheight. Ejemplo 640=0x280 y 400=0x190.",
-            style="Muted.TLabel",
-            wraplength=760,
-        ).pack(anchor="w", pady=8)
-
+    def __init__(self,parent,app):
+        super().__init__(parent,padding=10); self.app=app; self.cfg=app.config_manager
+        self.res=tk.StringVar(value=f"{self.cfg.get('VIDEO','reswidth','1024')}x{self.cfg.get('VIDEO','resheight','768')}")
+        self.shadows=tk.BooleanVar(value=self.cfg.getbool('VIDEO','unitshadows',True)); self._build()
+    def _build(self):
+        ttk.Label(self,text='🎥 Video / Resolución',style='Title.TLabel').pack(anchor='w')
+        box=ttk.LabelFrame(self,text='Configuración de video',padding=8); box.pack(fill='x',pady=8)
+        ttk.Label(box,text='Resolución:').pack(side='left')
+        ttk.Combobox(box,textvariable=self.res,values=[f'{w}x{h}' for w,h in COMMON_RES],width=18).pack(side='left',padx=6)
+        ttk.Checkbutton(box,text='Sombras de unidades',variable=self.shadows).pack(side='left',padx=8)
+        ttk.Button(box,text='Aplicar al registro',command=self.apply).pack(side='left',padx=8)
     def apply(self):
-        w, h = self.res_var.get().lower().split("x")
-        win_registry.apply_resolution(int(w), int(h), self.app.logger)
-        win_registry.apply_unit_shadows(self.shadows_var.get(), self.app.logger)
-        self.cfg.set("LAUNCH", "selected_resolution", self.res_var.get())
-        self.cfg.set("LAUNCH", "unit_shadows", self.shadows_var.get())
+        try:
+            w,h=self.res.get().lower().split('x'); rows=set_video(int(w),int(h),self.shadows.get())
+            self.cfg.set('VIDEO','reswidth',w); self.cfg.set('VIDEO','resheight',h); self.cfg.set('VIDEO','unitshadows',str(self.shadows.get()).lower())
+            for r in rows:self.app.log(r)
+            messagebox.showinfo('OK','Video aplicado al registro.')
+        except Exception as e: messagebox.showerror('Error',str(e))

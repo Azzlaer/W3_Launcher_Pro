@@ -1,185 +1,155 @@
 from __future__ import annotations
-
-import os
 import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
-import webbrowser
-
-from core.process_launcher import build_launch_command, launch_game
-from core.version_info import get_file_version
-from core import win_registry
-from core.gproxy_manager import gproxy_dir, launch_gproxy, write_gproxy_cfg, GProxyConfig
-
+from core.theme import ORC
+from core.assets import asset_path, load_image
+from core.version_tools import file_version
+from core.download_tools import start_process
 
 class DashboardTab(ttk.Frame):
-    """Pantalla Inicio: imagen, modo de juego y selección de loader."""
-
-    def __init__(self, master, app):
-        super().__init__(master, padding=8)
+    def __init__(self, parent, app):
+        super().__init__(parent, padding=8)
         self.app = app
-        self.cfg = app.cfg
-        self.log = app.logger.log
-        self.banner_img = None
-        self.gproxy_proc = None
-        self.build()
-        self.refresh_status()
+        self.cfg = app.config_manager
+        self.game_mode = tk.StringVar(value=self.cfg.get('GENERAL','last_game_mode','frozen_throne'))
+        self.loader = tk.StringVar(value=self.cfg.get('GENERAL','last_loader','normal'))
+        self.window = tk.BooleanVar(value=self.cfg.getbool('LAUNCH','window_mode',True))
+        self.opengl = tk.BooleanVar(value=self.cfg.getbool('LAUNCH','opengl',False))
+        self.path = tk.StringVar(value=self.cfg.get('GENERAL','warcraft_path',''))
+        self.info = tk.StringVar(value='')
+        self._images = []
+        self._build()
+        self.refresh_info()
 
-    def build(self):
-        self.columnconfigure(0, weight=1)
-        self.columnconfigure(1, weight=0)
-        self.rowconfigure(2, weight=1)
+    def _build(self):
+        # HERO VISUAL
+        hero = tk.Canvas(self, height=190, highlightthickness=2, highlightbackground=ORC['gold'], bg=ORC['panel'])
+        hero.pack(fill='x', pady=(0,8))
+        hero.bind('<Configure>', self._draw_hero)
 
-        image_box = ttk.LabelFrame(self, text="Inicio", padding=6)
-        image_box.grid(row=0, column=0, rowspan=3, sticky="nsew", padx=(0, 8))
-        image_box.columnconfigure(0, weight=1)
-        image_box.rowconfigure(0, weight=1)
+        # Barra rápida de ruta
+        route = ttk.LabelFrame(self, text='📁 Carpeta Warcraft III', padding=7)
+        route.pack(fill='x', pady=(0,8))
+        ttk.Entry(route, textvariable=self.path).pack(side='left', fill='x', expand=True, padx=(0,6))
+        ttk.Button(route, text='Buscar', command=self.choose_path).pack(side='left')
+        ttk.Button(route, text='Guardar', command=self.save_path).pack(side='left', padx=(6,0))
 
-        banner = Path(__file__).resolve().parent.parent / "assets" / "orc_banner.png"
-        if banner.exists():
-            try:
-                self.banner_img = tk.PhotoImage(file=str(banner))
-                ttk.Label(image_box, image=self.banner_img).grid(row=0, column=0, sticky="n", pady=(6, 8))
-            except Exception:
-                ttk.Label(image_box, text="⚔ WARCRAFT III ORC LAUNCHER PRO", style="Header.TLabel").grid(row=0, column=0, sticky="n", pady=20)
-        else:
-            ttk.Label(image_box, text="⚔ WARCRAFT III ORC LAUNCHER PRO", style="Header.TLabel").grid(row=0, column=0, sticky="n", pady=20)
+        grid = ttk.Frame(self)
+        grid.pack(fill='both', expand=True)
 
-        self.install_var = tk.StringVar(value=self.cfg.get("GAME", "install_path"))
-        path_row = ttk.Frame(image_box)
-        path_row.grid(row=1, column=0, sticky="ew", pady=(6, 0))
-        path_row.columnconfigure(1, weight=1)
-        ttk.Label(path_row, text="Carpeta:").grid(row=0, column=0, sticky="w")
-        ttk.Entry(path_row, textvariable=self.install_var).grid(row=0, column=1, sticky="ew", padx=5)
-        ttk.Button(path_row, text="...", width=4, command=self.pick_folder).grid(row=0, column=2)
+        left_col = ttk.Frame(grid)
+        left_col.pack(side='left', fill='both', expand=True, padx=(0,6))
+        right_col = ttk.Frame(grid)
+        right_col.pack(side='left', fill='both', expand=True, padx=(6,0))
 
-        controls = ttk.LabelFrame(self, text="Jugar", padding=8)
-        controls.grid(row=0, column=1, sticky="nsew")
-        controls.columnconfigure(1, weight=1)
+        modes = ttk.LabelFrame(left_col, text='⚔️ Modo de juego', padding=8)
+        modes.pack(fill='x', pady=(0,8))
+        ttk.Radiobutton(modes, text='Frozen Throne', variable=self.game_mode, value='frozen_throne').pack(anchor='w')
+        ttk.Radiobutton(modes, text='Reign of Chaos', variable=self.game_mode, value='reign_of_chaos').pack(anchor='w')
 
-        self.edition_var = tk.StringVar(value=self.cfg.get("GAME", "default_edition", "Frozen Throne"))
-        self.loader_var = tk.StringVar(value=self.cfg.get("GAME", "default_loader", "W3 Loader normal"))
-        self.window_var = tk.BooleanVar(value=self.cfg.get_bool("LAUNCH", "window_mode"))
-        self.opengl_var = tk.BooleanVar(value=self.cfg.get_bool("LAUNCH", "opengl"))
-        self.gproxy_var = tk.BooleanVar(value=self.cfg.get_bool("GPROXY", "auto_start_before_game", False))
+        launch_box = ttk.LabelFrame(left_col, text='🚀 Launcher / Loader', padding=8)
+        launch_box.pack(fill='x')
+        ttk.Radiobutton(launch_box, text='W3 Loader normal', variable=self.loader, value='normal').pack(anchor='w')
+        ttk.Radiobutton(launch_box, text='W3 Loader Rubattle', variable=self.loader, value='rubattle').pack(anchor='w')
+        ttk.Radiobutton(launch_box, text='WoEProxy / WorldOfEditors', variable=self.loader, value='woe').pack(anchor='w')
+        ttk.Radiobutton(launch_box, text='Directo sin loader', variable=self.loader, value='direct').pack(anchor='w')
 
-        ttk.Label(controls, text="Modo:").grid(row=0, column=0, sticky="w", pady=2)
-        ttk.Radiobutton(controls, text="Frozen Throne", variable=self.edition_var, value="Frozen Throne").grid(row=0, column=1, sticky="w")
-        ttk.Radiobutton(controls, text="Reign of Chaos", variable=self.edition_var, value="Reign of Chaos").grid(row=1, column=1, sticky="w")
+        params = ttk.LabelFrame(right_col, text='⚙️ Parámetros rápidos', padding=8)
+        params.pack(fill='x', pady=(0,8))
+        ttk.Checkbutton(params, text='Modo ventana (-window)', variable=self.window).pack(anchor='w')
+        ttk.Checkbutton(params, text='Mejora OpenGL (-opengl)', variable=self.opengl).pack(anchor='w')
 
-        ttk.Label(controls, text="Loader:").grid(row=2, column=0, sticky="w", pady=(8, 2))
-        self.loader_combo = ttk.Combobox(controls, textvariable=self.loader_var, state="readonly", values=["W3 Loader normal", "W3 Loader Rubattle", "Directo sin loader"], width=24)
-        self.loader_combo.grid(row=2, column=1, sticky="ew", pady=(8, 2))
+        preview = tk.Canvas(right_col, height=112, highlightthickness=1, highlightbackground=ORC['green2'], bg=ORC['panel2'])
+        preview.pack(fill='x', pady=(0,8))
+        preview.bind('<Configure>', self._draw_preview)
 
-        ttk.Checkbutton(controls, text="Ventana (-window)", variable=self.window_var).grid(row=3, column=1, sticky="w", pady=(8, 0))
-        ttk.Checkbutton(controls, text="OpenGL (-opengl)", variable=self.opengl_var).grid(row=4, column=1, sticky="w")
-        ttk.Checkbutton(controls, text="Iniciar GProxy antes", variable=self.gproxy_var).grid(row=5, column=1, sticky="w")
+        actions = ttk.Frame(right_col)
+        actions.pack(fill='x')
+        ttk.Button(actions, text='⚔️ JUGAR AHORA', style='Gold.TButton', command=self.launch_game).pack(side='left', fill='x', expand=True, ipady=10)
+        ttk.Button(actions, text='Actualizar', command=self.refresh_info).pack(side='left', padx=(8,0), ipady=10)
 
-        ttk.Button(controls, text="▶ JUGAR AHORA", style="Accent.TButton", command=self.launch).grid(row=6, column=0, columnspan=2, sticky="ew", pady=(12, 4))
-        ttk.Button(controls, text="Ver comando", command=self.show_command).grid(row=7, column=0, columnspan=2, sticky="ew")
+        status = ttk.LabelFrame(self, text='📌 Estado del launcher', padding=7)
+        status.pack(fill='x', pady=(8,0))
+        ttk.Label(status, textvariable=self.info, style='Muted.TLabel').pack(anchor='w')
 
-        tools = ttk.LabelFrame(self, text="Loader / Descargas", padding=8)
-        tools.grid(row=1, column=1, sticky="nsew", pady=(8, 0))
-        ttk.Button(tools, text="Abrir descarga Rubattle", command=self.open_rubattle).pack(fill="x")
-        ttk.Button(tools, text="Abrir carpeta WC3", command=self.open_folder).pack(fill="x", pady=5)
+    def _draw_hero(self, event):
+        canvas = event.widget
+        w, h = event.width, event.height
+        canvas.delete('all')
+        self._hero_img = load_image(asset_path('orc_night_camp.jpg'), size=(w, h), cover=True, darken=0.55)
+        if self._hero_img:
+            canvas.create_image(0, 0, image=self._hero_img, anchor='nw')
+        canvas.create_rectangle(10, 10, w-10, h-10, outline=ORC['gold'], width=1)
+        self._hero_logo = load_image(asset_path('latinbattle_logo.png'), size=(260, 90))
+        if self._hero_logo:
+            canvas.create_image(24, 18, image=self._hero_logo, anchor='nw')
+        canvas.create_text(w-26, 42, text='WC3 ORC LAUNCHER PRO', fill=ORC['gold'], font=('Segoe UI Black', 22), anchor='ne')
+        canvas.create_text(w-26, 75, text='Frozen Throne • PvPGN • GProxy • WoEProxy', fill=ORC['green'], font=('Segoe UI Semibold', 11), anchor='ne')
+        canvas.create_text(w-26, 104, text='Lok\'tar Ogar — preparado para LatinBattle y servidores clásicos', fill='#e8f4df', font=('Segoe UI', 10), anchor='ne')
+        canvas.create_text(24, h-28, text='Selecciona modo, loader y presiona JUGAR AHORA', fill='#ffffff', font=('Segoe UI Semibold', 10), anchor='sw')
 
-        status = ttk.LabelFrame(self, text="Estado rápido", padding=8)
-        status.grid(row=2, column=1, sticky="nsew", pady=(8, 0))
-        self.status_var = tk.StringVar(value="...")
-        self.version_var = tk.StringVar(value="...")
-        ttk.Label(status, textvariable=self.status_var, style="Status.TLabel").pack(anchor="w")
-        ttk.Label(status, textvariable=self.version_var, style="Muted.TLabel", wraplength=260).pack(anchor="w", pady=(6, 0))
-        ttk.Button(status, text="Actualizar estado", command=self.refresh_status).pack(fill="x", pady=(8, 0))
+    def _draw_preview(self, event):
+        canvas = event.widget
+        w, h = event.width, event.height
+        canvas.delete('all')
+        self._preview_img = load_image(asset_path('orc_day_banner.jpg'), size=(w, h), cover=True, darken=0.72)
+        if self._preview_img:
+            canvas.create_image(0, 0, image=self._preview_img, anchor='nw')
+        canvas.create_text(14, 18, text='Modo recomendado', fill=ORC['gold'], font=('Segoe UI Black', 11), anchor='nw')
+        canvas.create_text(14, 45, text='Frozen Throne + W3L normal + GProxy opcional', fill='#ffffff', font=('Segoe UI Semibold', 9), anchor='nw')
+        canvas.create_text(14, 72, text='Usa la pestaña GProxy para WoEProxy o GProxy clásico.', fill=ORC['muted'], font=('Segoe UI', 9), anchor='nw')
 
-    def pick_folder(self):
-        folder = filedialog.askdirectory(title="Seleccionar carpeta Warcraft III")
-        if folder:
-            self.install_var.set(folder)
-            self.cfg.set("GAME", "install_path", folder)
-            self.refresh_status()
+    def choose_path(self):
+        p = filedialog.askdirectory(title='Selecciona carpeta Warcraft III')
+        if p:
+            self.path.set(p)
+            self.refresh_info()
 
-    def selected_exe(self) -> str:
-        edition = self.edition_var.get()
-        loader = self.loader_var.get()
-        if loader == "W3 Loader normal":
-            return self.cfg.get("GAME", "normal_loader_exe", "w3l.exe")
-        if loader == "W3 Loader Rubattle":
-            return self.cfg.get("GAME", "rubattle_loader_exe", "w3l_rubattle.exe")
-        if edition == "Reign of Chaos":
-            return self.cfg.get("GAME", "warcraft_exe", "Warcraft III.exe")
-        return self.cfg.get("GAME", "frozen_throne_exe", "Frozen Throne.exe")
+    def save_path(self):
+        self.cfg.set('GENERAL','warcraft_path', self.path.get())
+        self.app.log(f'Carpeta guardada: {self.path.get()}')
 
-    def save_quick(self):
-        self.cfg.set("GAME", "install_path", self.install_var.get())
-        self.cfg.set("GAME", "default_edition", self.edition_var.get())
-        self.cfg.set("GAME", "default_loader", self.loader_var.get())
-        self.cfg.set("LAUNCH", "window_mode", self.window_var.get())
-        self.cfg.set("LAUNCH", "opengl", self.opengl_var.get())
-        self.cfg.set("GPROXY", "auto_start_before_game", self.gproxy_var.get())
+    def _exe(self):
+        folder = Path(self.path.get())
+        loader = self.loader.get()
+        if loader == 'normal':
+            return folder / self.cfg.get('EXECUTABLES','normal_loader_exe','w3l.exe')
+        if loader == 'rubattle':
+            return folder / self.cfg.get('EXECUTABLES','rubattle_loader_exe','w3l_rubattle.exe')
+        if loader == 'woe':
+            return folder / self.cfg.get('EXECUTABLES','woe_loader_exe','woeproxy.exe')
+        if self.game_mode.get() == 'reign_of_chaos':
+            return folder / self.cfg.get('EXECUTABLES','reign_of_chaos_exe','Warcraft III.exe')
+        return folder / self.cfg.get('EXECUTABLES','frozen_throne_exe','Frozen Throne.exe')
 
-    def _prelaunch(self):
-        if self.cfg.get_bool("LAUNCH", "cleanup_registry_before_launch"):
-            win_registry.cleanup_blizzard_registry(self.app.logger)
-        if self.cfg.get_bool("LAUNCH", "fix_world_editor_before_launch"):
-            win_registry.apply_world_editor_fix(self.app.logger)
-        if self.cfg.get_bool("LAUNCH", "add_gateways_before_launch"):
-            win_registry.apply_gateways(self.app.logger)
-
-    def build_cmd(self):
-        exe = self.selected_exe()
-        extra = self.cfg.get("LAUNCH", "extra_args", "")
-        return build_launch_command(self.install_var.get(), exe, self.window_var.get(), self.opengl_var.get(), extra)
-
-    def show_command(self):
-        self.save_quick()
-        cmd = self.build_cmd()
-        text = " ".join([f'"{x}"' if " " in x else x for x in cmd])
-        messagebox.showinfo("Comando de lanzamiento", text)
-
-    def start_gproxy_if_needed(self):
-        if not self.gproxy_var.get():
+    def launch_game(self):
+        self.save_path()
+        self.cfg.set('GENERAL','last_game_mode', self.game_mode.get())
+        self.cfg.set('GENERAL','last_loader', self.loader.get())
+        self.cfg.set('LAUNCH','window_mode', str(self.window.get()).lower())
+        self.cfg.set('LAUNCH','opengl', str(self.opengl.get()).lower())
+        exe = self._exe()
+        args=[]
+        if self.window.get(): args.append('-window')
+        if self.opengl.get(): args.append('-opengl')
+        extra = self.cfg.get('LAUNCH','extra_args','').strip()
+        if extra: args += extra.split()
+        if not exe.exists():
+            messagebox.showerror('No encontrado', f'No existe:\n{exe}')
             return
-        if self.gproxy_proc and self.gproxy_proc.poll() is None:
-            self.log("🛡 GProxy ya estaba activo desde el dashboard.")
-            return
-        folder = gproxy_dir(self.install_var.get(), self.cfg.get("GPROXY", "install_subdir", "GProxy"))
-        cfg = GProxyConfig(
-            install_path=self.install_var.get(),
-            bnet_hostname=self.cfg.get("GPROXY", "bnet_hostname", "eurobattle.net"),
-            game_port=int(self.cfg.get("GPROXY", "game_port", "6125")),
-            game_indicator=self.cfg.get("GPROXY", "game_indicator", "GProxy"),
-            bnet_addgateway=self.cfg.get_bool("GPROXY", "bnet_addgateway", True),
-            debug=self.cfg.get_bool("GPROXY", "debug", False),
-            log=self.cfg.get("GPROXY", "log", "gproxy.log"),
-        )
-        write_gproxy_cfg(folder, cfg)
-        self.gproxy_proc = launch_gproxy(folder, logger=self.app.logger)
-        self.log("🛡 GProxy iniciado antes del juego.")
+        start_process(exe, args=args, cwd=exe.parent)
+        self.app.log(f'Ejecutado: {exe.name} {" ".join(args)}')
 
-    def launch(self):
-        self.save_quick()
-        try:
-            self._prelaunch()
-            self.start_gproxy_if_needed()
-            proc = launch_game(self.install_var.get(), self.selected_exe(), self.window_var.get(), self.opengl_var.get(), self.cfg.get("LAUNCH", "extra_args", ""))
-            self.log(f"▶ Iniciado {self.edition_var.get()} con {self.loader_var.get()} | PID: {proc.pid}")
-        except Exception as e:
-            messagebox.showerror("Error al lanzar", str(e))
-            self.log(f"❌ Error al iniciar: {e}")
-
-    def refresh_status(self):
-        exe = Path(self.install_var.get()) / self.selected_exe()
-        self.status_var.set(f"{'✅ Detectado' if exe.exists() else '❌ No encontrado'}: {self.selected_exe()}")
-        info = get_file_version(exe)
-        self.version_var.set(f"FileVersion: {info.get('file_version','No disponible')}\nProductVersion: {info.get('product_version','No disponible')}")
-
-    def open_rubattle(self):
-        webbrowser.open(self.cfg.get("TOOLS", "rubattle_loader_url"))
-        self.log("🌐 Abriendo descarga de W3 Loader Rubattle")
-
-    def open_folder(self):
-        p = Path(self.install_var.get())
-        if p.exists():
-            os.startfile(str(p))
-        else:
-            messagebox.showwarning("Carpeta no encontrada", str(p))
+    def refresh_info(self):
+        folder = Path(self.path.get())
+        w3l = folder / 'w3l.exe'
+        ft = folder / self.cfg.get('EXECUTABLES','frozen_throne_exe','Frozen Throne.exe')
+        roc = folder / self.cfg.get('EXECUTABLES','reign_of_chaos_exe','Warcraft III.exe')
+        parts = []
+        parts.append(f'w3l.exe: {"OK" if w3l.exists() else "NO encontrado"}')
+        if w3l.exists():
+            parts.append(f'versión: {file_version(w3l)}')
+        parts.append(f'Frozen Throne: {"OK" if ft.exists() else "NO"}')
+        parts.append(f'Reign of Chaos: {"OK" if roc.exists() else "NO"}')
+        self.info.set(' | '.join(parts))

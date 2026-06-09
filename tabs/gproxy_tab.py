@@ -1,247 +1,148 @@
 from __future__ import annotations
-
-import threading
-import webbrowser
+import tkinter as tk
+from tkinter import ttk, messagebox, filedialog
 from pathlib import Path
-from tkinter import BooleanVar, StringVar, Text, messagebox, ttk
-
-from core.gproxy_manager import (
-    GProxyConfig,
-    download_and_install_gproxy,
-    find_gproxy_exe,
-    gproxy_dir,
-    launch_gproxy,
-    read_gproxy_cfg,
-    write_gproxy_cfg,
-)
-
+import shutil, zipfile, subprocess, os
+from core.download_tools import download_file, extract_archive_robust, open_url, start_process, filename_from_url, normalize_zipx_to_zip, get_latest_github_release_asset
+from core.theme import ORC
 
 class GProxyTab(ttk.Frame):
-    """Pestaña modular para descargar, instalar, configurar y ejecutar GProxy++."""
+    def __init__(self, parent, app):
+        super().__init__(parent, padding=10)
+        self.app=app; self.cfg=app.config_manager
+        self.wc3_path=tk.StringVar(value=self.cfg.get('GENERAL','warcraft_path',''))
+        self.install_dir=tk.StringVar(value=self.cfg.get('GPROXY','install_dir','tools\\GProxy'))
+        self.profile=tk.StringVar(value=self.cfg.get('GPROXY','server_profile','WorldOfEditors'))
+        self.server=tk.StringVar(value=self.cfg.get('GPROXY','server_address','worldofeditors.net'))
+        self.username=tk.StringVar(value=self.cfg.get('GPROXY','username','Azzlaer'))
+        self.auto_start=tk.BooleanVar(value=self.cfg.getbool('GPROXY','auto_start_before_game',False))
+        self.status=tk.StringVar(value='')
+        self._build(); self.refresh()
 
-    SERVERS = [
-        "eurobattle.net",
-        "rubattle.net",
-        "server.tsgamerz.com",
-        "pvpgn.onligamez.ru",
-        "uswest.battle.net",
-        "useast.battle.net",
-        "asia.battle.net",
-        "europe.battle.net",
-        "localhost",
-    ]
+    def _build(self):
+        head=ttk.Frame(self); head.pack(fill='x')
+        ttk.Label(head,text='🧩 GProxy / WoEProxy',style='Title.TLabel').pack(side='left')
+        ttk.Label(head,text='Protección contra desconexiones para servidores compatibles GHost++/GPS',style='Muted.TLabel').pack(side='right')
 
-    def __init__(self, master, app):
-        super().__init__(master, padding=8)
-        self.app = app
-        self.cfg = app.cfg
-        self.proc = None
+        box=ttk.LabelFrame(self,text='Configuración',padding=8); box.pack(fill='x',pady=8)
+        r=ttk.Frame(box); r.pack(fill='x',pady=2)
+        ttk.Label(r,text='Carpeta Warcraft III:',width=18).pack(side='left')
+        ttk.Entry(r,textvariable=self.wc3_path).pack(side='left',fill='x',expand=True,padx=4)
+        ttk.Button(r,text='Buscar',command=self.choose_wc3).pack(side='left')
+        r=ttk.Frame(box); r.pack(fill='x',pady=2)
+        ttk.Label(r,text='Instalar GProxy en:',width=18).pack(side='left')
+        ttk.Entry(r,textvariable=self.install_dir).pack(side='left',fill='x',expand=True,padx=4)
+        r=ttk.Frame(box); r.pack(fill='x',pady=2)
+        ttk.Label(r,text='Perfil:',width=18).pack(side='left')
+        cb=ttk.Combobox(r,textvariable=self.profile,values=['WorldOfEditors','Rubattle','GProxy Genérico','Personalizado'],state='readonly',width=22)
+        cb.pack(side='left',padx=4); cb.bind('<<ComboboxSelected>>',lambda e:self.apply_profile())
+        ttk.Label(r,text='Servidor:').pack(side='left',padx=(10,2))
+        ttk.Entry(r,textvariable=self.server,width=28).pack(side='left')
+        ttk.Label(r,text='Usuario:').pack(side='left',padx=(10,2))
+        ttk.Entry(r,textvariable=self.username,width=18).pack(side='left')
+        ttk.Checkbutton(box,text='Iniciar GProxy antes del juego',variable=self.auto_start).pack(anchor='w',pady=(4,0))
 
-        self.install_path = StringVar(value=self.cfg.get("GAME", "install_path"))
-        self.subdir = StringVar(value=self.cfg.get("GPROXY", "install_subdir", "GProxy"))
-        self.download_url = StringVar(value=self.cfg.get("GPROXY", "download_url"))
-        self.server = StringVar(value=self.cfg.get("GPROXY", "bnet_hostname", "eurobattle.net"))
-        self.port = StringVar(value=self.cfg.get("GPROXY", "game_port", "6125"))
-        self.indicator = StringVar(value=self.cfg.get("GPROXY", "game_indicator", "GProxy"))
-        self.add_gateway = BooleanVar(value=self.cfg.get_bool("GPROXY", "bnet_addgateway", True))
-        self.debug = BooleanVar(value=self.cfg.get_bool("GPROXY", "debug", False))
-        self.auto_start = BooleanVar(value=self.cfg.get_bool("GPROXY", "auto_start_before_game", False))
-        self.log_name = StringVar(value=self.cfg.get("GPROXY", "log", "gproxy.log"))
+        downloads=ttk.LabelFrame(self,text='Descargas / Instalación',padding=8); downloads.pack(fill='x',pady=8)
+        ttk.Button(downloads,text='⬇️ Descargar WoEProxy oficial',command=self.download_woe).pack(side='left',padx=3)
+        ttk.Button(downloads,text='🌐 Abrir WorldOfEditors',command=lambda:open_url(self.cfg.get('WORLD_OF_EDITORS','website','https://worldofeditors.net/'))).pack(side='left',padx=3)
+        ttk.Button(downloads,text='⬇️ Descargar GProxy GitHub',command=self.download_github_gproxy).pack(side='left',padx=3)
+        ttk.Button(downloads,text='🌐 Info Rubattle GProxy',command=lambda:open_url(self.cfg.get('RUBATTLE','info_url',''))).pack(side='left',padx=3)
+        ttk.Button(downloads,text='🌐 W3 Loader Rubattle',command=lambda:open_url(self.cfg.get('DOWNLOADS','rubattle_w3loader',''))).pack(side='left',padx=3)
 
-        self.build()
-        self.refresh_status()
+        actions=ttk.LabelFrame(self,text='Acciones',padding=8); actions.pack(fill='x',pady=8)
+        ttk.Button(actions,text='Guardar configuración',command=self.save).pack(side='left',padx=3)
+        ttk.Button(actions,text='▶ Ejecutar GPROXY.EXE',command=self.run_gproxy).pack(side='left',padx=3)
+        ttk.Button(actions,text='▶ Ejecutar WoEProxy',command=self.run_woe).pack(side='left',padx=3)
+        ttk.Button(actions,text='📁 Abrir carpeta GProxy',command=self.open_install_folder).pack(side='left',padx=3)
+        ttk.Button(actions,text='🔄 Comprobar',command=self.refresh).pack(side='left',padx=3)
 
-    def folder(self) -> Path:
-        return gproxy_dir(self.install_path.get(), self.subdir.get())
+        note=tk.Text(self,height=7,bg=ORC['entry'],fg=ORC['text'],relief='flat',font=('Consolas',9))
+        note.pack(fill='both',expand=True,pady=(6,0))
+        note.insert('end','''Notas importantes:\n- WoEProxy oficial se descarga desde https://proxy.worldofeditors.net/woeproxy.exe\n- WorldOfEditors indica ejecutar WoEProxy como administrador.\n- GProxy clásico requiere servidor compatible GHost++/GPS.\n- Si Windows Firewall pregunta, permite conexión privada/pública según tu servidor.\n- Para Rubattle, se deja el botón de información porque algunas descargas cambian con el tiempo.\n''')
+        note.config(state='disabled')
+        ttk.Label(self,textvariable=self.status,style='Muted.TLabel').pack(anchor='w',pady=(5,0))
 
-    def build(self):
-        ttk.Label(self, text="🛡 GProxy++ Protección de desconexión", style="Title.TLabel").pack(anchor="w", pady=(0, 6))
+    def choose_wc3(self):
+        p=filedialog.askdirectory(title='Carpeta Warcraft III')
+        if p: self.wc3_path.set(p)
 
-        info = ttk.LabelFrame(self, text="¿Qué hace?", padding=8)
-        info.pack(fill="x", pady=(0, 7))
-        ttk.Label(
-            info,
-            text=(
-                "GProxy++ se ejecuta antes del juego, agrega un gateway local llamado GProxy y permite reconectar "
-                "si hay una caída temporal en partidas alojadas en servidores GHost++ compatibles."
-            ),
-            style="Muted.TLabel",
-            wraplength=820,
-        ).pack(anchor="w")
+    def install_path(self):
+        p=Path(self.install_dir.get())
+        if not p.is_absolute(): p=Path(__file__).resolve().parents[1]/p
+        return p
 
-        top = ttk.Frame(self)
-        top.pack(fill="x", pady=(0, 7))
-        left = ttk.LabelFrame(top, text="Instalación", padding=8)
-        left.pack(side="left", fill="both", expand=True, padx=(0, 5))
-        right = ttk.LabelFrame(top, text="Estado", padding=8)
-        right.pack(side="right", fill="both", expand=True, padx=(5, 0))
+    def apply_profile(self):
+        if self.profile.get()=='WorldOfEditors': self.server.set('worldofeditors.net')
+        elif self.profile.get()=='Rubattle': self.server.set('rubattle.net')
+        elif self.profile.get()=='GProxy Genérico': self.server.set('PUBLIC.INDOGAMERS.US')
 
-        self._row_entry(left, "Carpeta WC3", self.install_path)
-        self._row_entry(left, "Subcarpeta", self.subdir)
-        self._row_entry(left, "URL descarga", self.download_url)
-        btns = ttk.Frame(left)
-        btns.pack(fill="x", pady=(7, 0))
-        ttk.Button(btns, text="🌐 Abrir GitHub", command=self.open_github).pack(side="left")
-        ttk.Button(btns, text="⬇ Descargar / instalar", style="Accent.TButton", command=self.download_install).pack(side="left", padx=5)
-        ttk.Button(btns, text="📁 Abrir carpeta", command=self.open_folder).pack(side="left")
+    def save(self):
+        for s,k,v in [('GENERAL','warcraft_path',self.wc3_path.get()),('GPROXY','install_dir',self.install_dir.get()),('GPROXY','server_profile',self.profile.get()),('GPROXY','server_address',self.server.get()),('GPROXY','username',self.username.get()),('GPROXY','auto_start_before_game',str(self.auto_start.get()).lower())]:
+            self.cfg.set(s,k,v)
+        self.app.log('Configuración GProxy guardada.')
 
-        self.status_text = Text(right, height=7, bg="#050B06", fg="#80FF68", relief="flat", font=("Consolas", 9), padx=6, pady=5)
-        self.status_text.pack(fill="both", expand=True)
-        ttk.Button(right, text="🔍 Actualizar estado", command=self.refresh_status).pack(anchor="e", pady=(6, 0))
-
-        cfgbox = ttk.LabelFrame(self, text="Configuración gproxy.cfg", padding=8)
-        cfgbox.pack(fill="x", pady=(0, 7))
-        row1 = ttk.Frame(cfgbox)
-        row1.pack(fill="x", pady=2)
-        ttk.Label(row1, text="Servidor destino", width=16).pack(side="left")
-        server_combo = ttk.Combobox(row1, values=self.SERVERS, textvariable=self.server, width=32)
-        server_combo.pack(side="left", padx=(0, 8))
-        ttk.Label(row1, text="Puerto", width=8).pack(side="left")
-        ttk.Entry(row1, textvariable=self.port, width=10).pack(side="left", padx=(0, 8))
-        ttk.Label(row1, text="Indicador", width=10).pack(side="left")
-        ttk.Entry(row1, textvariable=self.indicator, width=18).pack(side="left")
-
-        row2 = ttk.Frame(cfgbox)
-        row2.pack(fill="x", pady=4)
-        ttk.Checkbutton(row2, text="Agregar gateway local GProxy", variable=self.add_gateway).pack(side="left")
-        ttk.Checkbutton(row2, text="Debug", variable=self.debug).pack(side="left", padx=8)
-        ttk.Checkbutton(row2, text="Iniciar GProxy antes del juego", variable=self.auto_start).pack(side="left", padx=8)
-        ttk.Label(row2, text="Log", width=5).pack(side="left")
-        ttk.Entry(row2, textvariable=self.log_name, width=18).pack(side="left")
-
-        actions = ttk.Frame(cfgbox)
-        actions.pack(fill="x", pady=(6, 0))
-        ttk.Button(actions, text="💾 Guardar config", style="Accent.TButton", command=self.save_config).pack(side="left")
-        ttk.Button(actions, text="📖 Leer config actual", command=self.load_existing_cfg).pack(side="left", padx=5)
-        ttk.Button(actions, text="🚀 Iniciar GProxy", style="Accent.TButton", command=self.start_gproxy).pack(side="left", padx=5)
-        ttk.Button(actions, text="🛑 Detener", style="Danger.TButton", command=self.stop_gproxy).pack(side="left")
-
-        notes = ttk.LabelFrame(self, text="Notas importantes", padding=8)
-        notes.pack(fill="both", expand=True)
-        ttk.Label(
-            notes,
-            text=(
-                "1) Primero inicia GProxy y luego abre Warcraft III.  2) En Battle.net elige el gateway GProxy.  "
-                "3) Esta protección solo funciona bien si el host/servidor usa GHost++ con soporte GPS/GProxy.  "
-                "4) Si cambias el servidor destino, guarda gproxy.cfg antes de iniciar."
-            ),
-            style="Muted.TLabel",
-            wraplength=820,
-        ).pack(anchor="w")
-
-    def _row_entry(self, parent, label, variable):
-        row = ttk.Frame(parent)
-        row.pack(fill="x", pady=2)
-        ttk.Label(row, text=label, width=13).pack(side="left")
-        ttk.Entry(row, textvariable=variable).pack(side="left", fill="x", expand=True)
-
-    def open_github(self):
-        webbrowser.open(self.cfg.get("GPROXY", "github_url", "https://github.com/dns/GProxy-Warcraft3-disconnect-protection-tool"))
-
-    def open_folder(self):
-        folder = self.folder()
-        folder.mkdir(parents=True, exist_ok=True)
-        webbrowser.open(str(folder))
-
-    def refresh_status(self):
-        folder = self.folder()
-        exe = find_gproxy_exe(folder)
-        cfg_path = folder / "gproxy.cfg"
-        lines = [
-            f"Carpeta: {folder}",
-            f"GProxy.exe: {'OK' if exe else 'NO ENCONTRADO'}",
-            f"gproxy.cfg: {'OK' if cfg_path.exists() else 'NO ENCONTRADO'}",
-            f"Proceso GUI: {'ACTIVO' if self.proc and self.proc.poll() is None else 'DETENIDO / no iniciado desde GUI'}",
-        ]
-        if exe:
-            lines.append(f"EXE: {exe.name}")
-        self.status_text.configure(state="normal")
-        self.status_text.delete("1.0", "end")
-        self.status_text.insert("end", "\n".join(lines))
-        self.status_text.configure(state="disabled")
-
-    def persist_fields(self):
-        self.cfg.set("GAME", "install_path", self.install_path.get())
-        self.cfg.set("GPROXY", "install_subdir", self.subdir.get())
-        self.cfg.set("GPROXY", "download_url", self.download_url.get())
-        self.cfg.set("GPROXY", "bnet_hostname", self.server.get())
-        self.cfg.set("GPROXY", "game_port", self.port.get())
-        self.cfg.set("GPROXY", "game_indicator", self.indicator.get())
-        self.cfg.set("GPROXY", "bnet_addgateway", self.add_gateway.get())
-        self.cfg.set("GPROXY", "debug", self.debug.get())
-        self.cfg.set("GPROXY", "auto_start_before_game", self.auto_start.get())
-        self.cfg.set("GPROXY", "log", self.log_name.get())
-
-    def save_config(self):
+    def download_woe(self):
+        self.save(); url=self.cfg.get('WORLD_OF_EDITORS','proxy_url','https://proxy.worldofeditors.net/woeproxy.exe')
+        dest_wc3=Path(self.wc3_path.get())/'woeproxy.exe'
         try:
-            port = int(self.port.get())
-            if port <= 0 or port > 65535:
-                raise ValueError("El puerto debe estar entre 1 y 65535.")
-            self.persist_fields()
-            cfg = GProxyConfig(
-                install_path=self.install_path.get(),
-                bnet_hostname=self.server.get().strip(),
-                game_port=port,
-                game_indicator=self.indicator.get().strip(),
-                bnet_addgateway=self.add_gateway.get(),
-                debug=self.debug.get(),
-                log=self.log_name.get().strip() or "gproxy.log",
-            )
-            path = write_gproxy_cfg(self.folder(), cfg)
-            self.app.logger.log(f"✅ Configuración GProxy guardada: {path}")
-            self.refresh_status()
+            download_file(url,dest_wc3,lambda d,t:self.app.log(f'Descargando WoEProxy {d}/{t or "?"} bytes'))
+            also=self.install_path()/ 'woeproxy.exe'; also.parent.mkdir(parents=True,exist_ok=True); shutil.copy2(dest_wc3,also)
+            self.app.log(f'WoEProxy instalado en Warcraft III y tools: {dest_wc3}')
+            self.refresh()
         except Exception as e:
-            self.app.logger.log(f"❌ Error guardando GProxy: {e}")
-            messagebox.showerror("GProxy", str(e))
+            messagebox.showerror('Error',str(e))
 
-    def load_existing_cfg(self):
-        data = read_gproxy_cfg(self.folder())
-        if not data:
-            messagebox.showinfo("GProxy", "No encontré gproxy.cfg en la carpeta configurada.")
+    def download_github_gproxy(self):
+        self.save()
+        fallback = self.cfg.get('DOWNLOADS','github_gproxy_zip','')
+        url = get_latest_github_release_asset(
+            'dns/GProxy-Warcraft3-disconnect-protection-tool',
+            r'GProxy.*\.(zipx|zip)$',
+            fallback
+        )
+        original_name = filename_from_url(url, 'GProxy-2.0.zipx')
+        dest = Path(__file__).resolve().parents[1] / 'tools' / 'downloads' / original_name
+        try:
+            self.app.log(f'URL GProxy seleccionada: {url}')
+            download_file(url, dest, lambda d,t:self.app.log(f'Descargando GProxy {d}/{t or "?"} bytes'))
+
+            final_archive = normalize_zipx_to_zip(dest)
+            if final_archive != dest:
+                self.app.log(f'Archivo .zipx renombrado automáticamente a: {final_archive.name}')
+
+            ok, msg = extract_archive_robust(final_archive, self.install_path(), log=self.app.log)
+            self.app.log(msg)
+            if not ok:
+                messagebox.showwarning('GProxy descargado, extracción pendiente', msg)
+            self.refresh()
+        except Exception as e:
+            messagebox.showerror('Error',str(e))
+
+    def run_gproxy(self):
+        exe=self.install_path()/'GPROXY.EXE'
+        if not exe.exists(): exe=self.install_path()/'gproxy.exe'
+        if not exe.exists():
+            messagebox.showwarning('No encontrado','No encontré GPROXY.EXE en la carpeta de instalación.')
             return
-        self.server.set(data.get("bnet_hostname", self.server.get()))
-        self.port.set(data.get("game_port", self.port.get()))
-        self.indicator.set(data.get("game_indicator", self.indicator.get()))
-        self.add_gateway.set(data.get("bnet_addgateway", "1") not in ("0", "false", "False"))
-        self.debug.set(data.get("debug", "0") in ("1", "true", "True"))
-        self.log_name.set(data.get("log", self.log_name.get()))
-        self.app.logger.log("📖 gproxy.cfg cargado en el formulario.")
+        start_process(exe,cwd=exe.parent)
+        self.app.log(f'GProxy ejecutado: {exe}')
 
-    def download_install(self):
-        self.persist_fields()
-        def worker():
-            try:
-                folder = download_and_install_gproxy(
-                    self.download_url.get(),
-                    self.install_path.get(),
-                    self.subdir.get(),
-                    logger=self.app.logger,
-                )
-                self.app.logger.log(f"✅ Instalación GProxy terminada en: {folder}")
-                self.save_config()
-            except Exception as e:
-                self.app.logger.log(f"❌ Error instalando GProxy: {e}")
-                messagebox.showerror("GProxy", str(e))
-            finally:
-                self.refresh_status()
-        threading.Thread(target=worker, daemon=True).start()
+    def run_woe(self):
+        p1=Path(self.wc3_path.get())/'woeproxy.exe'; p2=self.install_path()/'woeproxy.exe'
+        exe=p1 if p1.exists() else p2
+        if not exe.exists():
+            messagebox.showwarning('No encontrado','No encontré woeproxy.exe. Usa Descargar WoEProxy oficial.')
+            return
+        start_process(exe,cwd=exe.parent)
+        self.app.log(f'WoEProxy ejecutado: {exe}')
 
-    def start_gproxy(self):
-        try:
-            self.save_config()
-            if self.proc and self.proc.poll() is None:
-                messagebox.showinfo("GProxy", "GProxy ya está iniciado desde esta ventana.")
-                return
-            self.proc = launch_gproxy(self.folder(), logger=self.app.logger)
-            self.refresh_status()
-        except Exception as e:
-            self.app.logger.log(f"❌ Error iniciando GProxy: {e}")
-            messagebox.showerror("GProxy", str(e))
+    def open_install_folder(self):
+        p=self.install_path(); p.mkdir(parents=True,exist_ok=True)
+        os.startfile(str(p)) if os.name=='nt' else subprocess.Popen(['xdg-open',str(p)])
 
-    def stop_gproxy(self):
-        if self.proc and self.proc.poll() is None:
-            self.proc.terminate()
-            self.app.logger.log("🛑 GProxy detenido desde el launcher.")
-        else:
-            self.app.logger.log("ℹ No hay proceso GProxy activo iniciado por esta GUI.")
-        self.refresh_status()
+    def refresh(self):
+        wc3=Path(self.wc3_path.get())
+        items=[]
+        for p in [wc3/'woeproxy.exe', self.install_path()/'GPROXY.EXE', self.install_path()/'gproxy.exe']:
+            items.append(f'{p.name}: {"OK" if p.exists() else "NO"}')
+        self.status.set(' | '.join(items))
